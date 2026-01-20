@@ -5,84 +5,274 @@
   <title>PDF → Excel | Valcredit</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <!-- SheetJS local -->
+  <!-- ✅ PDF.js local (obligatorio para leer PDF) -->
+  <script src="./pdf.min.js"></script>
+  <!-- ✅ SheetJS local (para generar Excel) -->
   <script src="./xlsx.full.min.js"></script>
 
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f3f4f6;
-      padding: 40px;
-    }
-    .card {
-      background: white;
-      padding: 30px;
-      max-width: 700px;
-      margin: auto;
-      border-radius: 12px;
-      box-shadow: 0 10px 25px rgba(0,0,0,.1);
-    }
+    body { font-family: Arial, sans-serif; background: #f3f4f6; padding: 40px; }
+    .card { background: white; padding: 30px; max-width: 860px; margin: auto; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,.1); }
     h1 { margin-top: 0; }
-    input, button {
-      margin-top: 15px;
-    }
-    button {
-      padding: 10px 18px;
-      background: #111827;
-      color: white;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-    }
-    pre {
-      background: #111827;
-      color: #e5e7eb;
-      padding: 15px;
-      border-radius: 8px;
-      margin-top: 20px;
-      max-height: 200px;
-      overflow: auto;
-    }
+    input, button { margin-top: 15px; }
+    button { padding: 10px 18px; background: #111827; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 700; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    pre { background: #111827; color: #e5e7eb; padding: 15px; border-radius: 8px; margin-top: 20px; max-height: 260px; overflow: auto; font-size: 13px; white-space: pre-wrap; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .muted { color:#6b7280; font-size:13px; margin-top:8px; }
   </style>
 </head>
 
 <body>
   <div class="card">
     <h1>PDF → Excel (Valcredit)</h1>
-    <p>Sube el PDF del plan de pagos y descarga el Excel.</p>
+    <p class="muted">
+      Sube un PDF <b>digital</b> del plan de pagos y descarga Excel/CSV con desglose <b>Capital vs Aval</b>.
+    </p>
 
     <input type="file" id="pdfFile" accept="application/pdf">
-    <br>
-    <button onclick="convertir()">Generar Excel</button>
+    <div class="row">
+      <button id="btnProcesar">Procesar PDF</button>
+      <button id="btnExcel" disabled>Descargar Excel</button>
+      <button id="btnCsv" disabled>Descargar CSV</button>
+    </div>
 
     <pre id="log">(esperando PDF)</pre>
   </div>
 
 <script>
-function convertir() {
-  const file = document.getElementById("pdfFile").files[0];
-  if (!file) {
-    alert("Sube un PDF");
-    return;
+/* =============================
+   0) Validaciones y config
+============================= */
+const logEl = document.getElementById("log");
+const fileEl = document.getElementById("pdfFile");
+const btnProcesar = document.getElementById("btnProcesar");
+const btnExcel = document.getElementById("btnExcel");
+const btnCsv = document.getElementById("btnCsv");
+
+let latestRows = [];
+let latestCsv = "";
+
+function log(msg) {
+  logEl.textContent = msg;
+}
+
+// PDF.js expone window.pdfjsLib (en builds UMD)
+const pdfjsLib = window.pdfjsLib;
+if (!pdfjsLib) {
+  log("❌ No cargó PDF.js. Revisa que pdf.min.js esté en el repo (misma carpeta de index.html).");
+  throw new Error("pdfjsLib not found");
+}
+if (!window.XLSX) {
+  log("❌ No cargó SheetJS. Revisa xlsx.full.min.js en el repo.");
+  throw new Error("XLSX not found");
+}
+
+// Worker local
+pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdf.worker.min.js";
+
+/* =============================
+   1) Helpers
+============================= */
+function normalizeText(t) {
+  return (t || "")
+    .replace(/\u00A0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n+/g, "\n");
+}
+
+function parseMoneyToInt(v) {
+  if (!v) return 0;
+  const d = String(v).replace(/[^\d]/g, "");
+  return d ? parseInt(d, 10) : 0;
+}
+
+function escapeCsv(v) {
+  const s = (v === null || v === undefined) ? "" : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/* =============================
+   2) PDF -> texto
+============================= */
+async function extractTextFromPdf(file) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+
+  let text = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(it => it.str).join(" ") + "\n";
+  }
+  return text;
+}
+
+/* =============================
+   3) Extraer datos (Valcredit)
+============================= */
+function extractValorAval(text) {
+  // Ej: "Valor aval $ 104.795"  (con o sin $)
+  const m = text.match(/Valor\s+aval\s*\$?\s*([\d\.,]+)/i);
+  return m ? parseMoneyToInt(m[1]) : 0;
+}
+
+function extractNumeroCuotas(text) {
+  const m = text.match(/Número\s+de\s+cuotas:\s*(\d+)/i);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+function extractRows(text) {
+  const rows = [];
+
+  // Cuota inicial: "Cuota inicial $ 231.165 Pago inmediato"
+  const init = text.match(/Cuota\s+inicial\s*\$?\s*([\d\.,]+)\s+(Pago\s+inmediato)/i);
+  if (init) {
+    rows.push({
+      cuota: "Cuota inicial",
+      valor_cuota: parseMoneyToInt(init[1]),
+      fecha_pago: init[2]
+    });
   }
 
-  // ⚠️ SIMPLIFICADO: datos de ejemplo (luego lo afinamos)
-  const data = [
-    ["cuota","valor_cuota","fecha_pago","valor_aval","valor_capital"],
-    ["Cuota inicial",432330,"Pago inmediato",0,432330],
-    [1,272368,"28-02-2026",4035,268333],
-    [2,272368,"28-03-2026",4035,268333]
-  ];
+  // Cuotas: "1 $ 353.683 15-02-2026"
+  const re = /(\d+)\s*\$?\s*([\d\.,]+)\s+(\d{2}-\d{2}-\d{4})/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    rows.push({
+      cuota: parseInt(m[1], 10),
+      valor_cuota: parseMoneyToInt(m[2]),
+      fecha_pago: m[3]
+    });
+  }
 
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(data);
-  XLSX.utils.book_append_sheet(wb, ws, "PlanPagos");
+  // Orden: inicial primero, luego 1..N
+  rows.sort((a,b) => {
+    if (a.cuota === "Cuota inicial") return -1;
+    if (b.cuota === "Cuota inicial") return 1;
+    return a.cuota - b.cuota;
+  });
 
-  XLSX.writeFile(wb, "plan_pagos.xlsx");
-
-  document.getElementById("log").textContent =
-    "✅ Excel generado correctamente";
+  return rows;
 }
+
+function inferNumeroCuotas(rows) {
+  const nums = rows.filter(r => typeof r.cuota === "number").map(r => r.cuota);
+  return nums.length ? Math.max(...nums) : 0;
+}
+
+// Prorrateo exacto: la suma de aval_prorrateado debe dar valor_aval_total
+function buildAvalParts(valorAval, n) {
+  if (!valorAval || !n) return Array(n).fill(0);
+  const base = Math.floor(valorAval / n);
+  let rem = valorAval - base * n;
+  const parts = Array(n).fill(base);
+  for (let i = 0; i < n && rem > 0; i++, rem--) parts[i] += 1; // reparte residuo
+  return parts; // parts[0] => cuota 1
+}
+
+function applyAval(rows, valorAval, numeroCuotas) {
+  const n = numeroCuotas || inferNumeroCuotas(rows);
+  const parts = buildAvalParts(valorAval, n);
+
+  return rows.map(r => {
+    const isCuota = (typeof r.cuota === "number" && r.cuota >= 1);
+    const aval = isCuota ? parts[r.cuota - 1] : 0;
+    const total = r.valor_cuota || 0;
+
+    return {
+      cuota: r.cuota,
+      valor_cuota: total,
+      fecha_pago: r.fecha_pago || "",
+      valor_aval_total: valorAval,
+      aval_prorrateado: aval,
+      valor_capital: total - aval
+    };
+  });
+}
+
+/* =============================
+   4) Export CSV / Excel
+============================= */
+function rowsToCsv(rows) {
+  const headers = ["cuota","valor_cuota","fecha_pago","valor_aval_total","aval_prorrateado","valor_capital"];
+  const lines = [headers.join(",")];
+  for (const r of rows) lines.push(headers.map(h => escapeCsv(r[h])).join(","));
+  return lines.join("\n");
+}
+
+function rowsToXlsxBlob(rows) {
+  const ws = XLSX.utils.json_to_sheet(rows, {
+    header: ["cuota","valor_cuota","fecha_pago","valor_aval_total","aval_prorrateado","valor_capital"]
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "PlanPagos");
+  const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  return new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+
+/* =============================
+   5) UI
+============================= */
+btnProcesar.addEventListener("click", async () => {
+  const file = fileEl.files?.[0];
+  if (!file) { alert("Sube un PDF"); return; }
+
+  try {
+    btnExcel.disabled = true;
+    btnCsv.disabled = true;
+    latestRows = [];
+    latestCsv = "";
+    log("⏳ Leyendo PDF…");
+
+    const raw = await extractTextFromPdf(file);
+    const text = normalizeText(raw);
+
+    const valorAval = extractValorAval(text);
+    let numeroCuotas = extractNumeroCuotas(text);
+
+    const baseRows = extractRows(text);
+    if (!baseRows.length) {
+      throw new Error("No detecté cuotas. ¿El PDF es escaneado o cambió el formato?");
+    }
+
+    if (!numeroCuotas) numeroCuotas = inferNumeroCuotas(baseRows);
+
+    latestRows = applyAval(baseRows, valorAval, numeroCuotas);
+    latestCsv = rowsToCsv(latestRows);
+
+    log("✅ Procesado.\n\nVista previa CSV:\n\n" + latestCsv);
+
+    btnExcel.disabled = false;
+    btnCsv.disabled = false;
+  } catch (e) {
+    console.error(e);
+    log("❌ Error: " + (e.message || e));
+  }
+});
+
+btnExcel.addEventListener("click", () => {
+  if (!latestRows.length) return;
+  downloadBlob("plan_de_pagos.xlsx", rowsToXlsxBlob(latestRows));
+});
+
+btnCsv.addEventListener("click", () => {
+  if (!latestCsv) return;
+  downloadBlob("plan_de_pagos.csv", new Blob([latestCsv], { type: "text/csv;charset=utf-8" }));
+});
 </script>
 </body>
 </html>
+
+
