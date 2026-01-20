@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>PDF → Excel | Valcredit</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!-- SheetJS local -->
+  <script src="./xlsx.full.min.js"></script>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f3f4f6;
+      padding: 40px;
+    }
+    .card {
+      background: white;
+      padding: 30px;
+      max-width: 700px;
+      margin: auto;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px rgba(0,0,0,.1);
+    }
+    h1 { margin-top: 0; }
+    input, button {
+      margin-top: 15px;
+    }
+    button {
+      padding: 10px 18px;
+      background: #111827;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    pre {
+      background: #111827;
+      color: #e5e7eb;
+      padding: 15px;
+      border-radius: 8px;
+      margin-top: 20px;
+      max-height: 200px;
+      overflow: auto;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <h1>PDF → Excel (Valcredit)</h1>
+    <p>Sube el PDF del plan de pagos y descarga el Excel.</p>
+
+    <input type="file" id="pdfFile" accept="application/pdf">
+    <br>
+    <button onclick="convertir()">Generar Excel</button>
+
+    <pre id="log">(esperando PDF)</pre>
+  </div>
+
+<script>
+function convertir() {
+  const file = document.getElementById("pdfFile").files[0];
+  if (!file) {
+    alert("Sube un PDF");
+    return;
+  }
+
+  // ⚠️ SIMPLIFICADO: datos de ejemplo (luego lo afinamos)
+  const data = [
+    ["cuota","valor_cuota","fecha_pago","valor_aval","valor_capital"],
+    ["Cuota inicial",432330,"Pago inmediato",0,432330],
+    [1,272368,"28-02-2026",4035,268333],
+    [2,272368,"28-03-2026",4035,268333]
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  XLSX.utils.book_append_sheet(wb, ws, "PlanPagos");
+
+  XLSX.writeFile(wb, "plan_pagos.xlsx");
+
+  document.getElementById("log").textContent =
+    "✅ Excel generado correctamente";
+}
+</script>
+</body>
+</html>
